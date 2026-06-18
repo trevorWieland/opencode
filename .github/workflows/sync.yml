@@ -6,12 +6,16 @@ name: daily-upstream-sync
 # fails (intervention required). Success and self-healed days are silent.
 #
 # FORK-INTERNAL ONLY: GITHUB_TOKEN here cannot reach anomalyco/opencode, and this
-# job never pushes the PR-bound `patches/*` branches.
+# job never pushes the PR-bound feat/* branches.
+#
+# Layout: the CODE stack is checked out into the workspace (so bun install / gates
+# / build work), and the automation infra is checked out into ./.infra so the
+# scripts survive the git checkouts the sync performs in the workspace.
 
 on:
   schedule:
-    - cron: "0 9 * * *" # 09:00 UTC daily — TODO: confirm preferred time
-  workflow_dispatch: {} # manual trigger for testing
+    - cron: "0 9 * * *" # 09:00 UTC daily
+  workflow_dispatch: {} # manual trigger
 
 concurrency:
   group: upstream-sync
@@ -27,6 +31,8 @@ env:
   STACK_TOP: feat/structured-output-permission-exempt # tip of the feat/* patch stack (bug-fix -> ④ cli -> ③ perm-exempt)
   PERSONAL: personal
   RERERE_DIR: ${{ github.workspace }}/.rr-cache
+  INFRA: ${{ github.workspace }}/.infra
+  PROMPT_FILE: ${{ github.workspace }}/.infra/prompts/resolve-conflict.md
   AGENT_MODEL: ${{ vars.AGENT_MODEL || 'zai-coding-plan/glm-5.2' }} # official Z.AI provider/model
   NTFY_URL: ${{ secrets.NTFY_URL }}
 
@@ -34,10 +40,17 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout automation branch (full history)
+      - name: Checkout code stack (workspace)
         uses: actions/checkout@v4
         with:
+          ref: feat/structured-output-permission-exempt
           fetch-depth: 0
+
+      - name: Checkout automation infra (.infra)
+        uses: actions/checkout@v4
+        with:
+          ref: automation
+          path: .infra
 
       - name: Materialize fork branches locally
         run: |
@@ -56,7 +69,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Restore rerere cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .rr-cache
           key: rerere-${{ github.run_id }}
@@ -66,7 +79,7 @@ jobs:
         id: det
         run: |
           set +e
-          SYNC_DATE="$(date -u +%Y%m%d)" bash scripts/sync-upstream.sh
+          SYNC_DATE="$(date -u +%Y%m%d)" bash "$INFRA/scripts/sync-upstream.sh"
           echo "code=$?" >> "$GITHUB_OUTPUT"
 
       - name: Configure opencode for GLM (agent runtime)
@@ -78,22 +91,24 @@ jobs:
           curl -fsSL https://opencode.ai/install | bash
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
           # Authenticate the official Z.AI provider (zai-coding-plan) via auth.json.
-          bash scripts/configure-opencode-glm.sh
+          bash "$INFRA/scripts/configure-opencode-glm.sh"
 
       - name: Agentic resolve (once)
         id: agent
         if: steps.det.outputs.code == '10' || steps.det.outputs.code == '20'
         run: |
           set +e
-          SYNC_DATE="$(date -u +%Y%m%d)" bash scripts/agentic-resolve.sh
+          SYNC_DATE="$(date -u +%Y%m%d)" bash "$INFRA/scripts/agentic-resolve.sh"
           echo "code=$?" >> "$GITHUB_OUTPUT"
 
       - name: Publish (deterministic or agent succeeded)
         if: steps.det.outputs.code == '0' || steps.agent.outputs.code == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git push --force-with-lease origin "$PERSONAL"
           git push origin "$MIRROR"
-          bash scripts/build-and-release.sh   # build binary -> rolling 'fork-latest' release
+          bash "$INFRA/scripts/build-and-release.sh" # build binary -> rolling 'fork-latest' release
 
       - name: Escalate (intervention required)
         if: >
@@ -103,12 +118,13 @@ jobs:
           DATE="$(date -u +%Y%m%d)"
           git push --force-with-lease origin "HEAD:sync/attempt-${DATE}" || true
           REASON="det=${{ steps.det.outputs.code }} agent=${{ steps.agent.outputs.code }}"
-          bash scripts/notify.sh "opencode fork sync needs you" \
+          bash "$INFRA/scripts/notify.sh" "opencode fork sync needs you" \
             "Daily sync could not self-heal (${REASON}). See branch sync/attempt-${DATE}."
           exit 1
 
       - name: Save rerere cache
         if: always()
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: .rr-cache
