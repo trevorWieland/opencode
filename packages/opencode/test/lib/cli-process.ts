@@ -91,6 +91,8 @@ export type RunOpts = SpawnOpts & {
   readonly agent?: string
   readonly format?: "default" | "json"
   readonly command?: string
+  readonly outputSchema?: string
+  readonly outputSchemaRetries?: number
   readonly printLogs?: boolean
   readonly extraArgs?: string[]
 }
@@ -243,6 +245,9 @@ export function withCliFixture<A, E>(
       if (opts?.agent) argv.push("--agent", opts.agent)
       if (opts?.format) argv.push("--format", opts.format)
       if (opts?.command) argv.push("--command", opts.command)
+      if (opts?.outputSchema !== undefined) argv.push("--output-schema", opts.outputSchema)
+      if (opts?.outputSchemaRetries !== undefined)
+        argv.push("--output-schema-retries", String(opts.outputSchemaRetries))
       if (opts?.extraArgs) argv.push(...opts.extraArgs)
       argv.push(message)
       return spawn(argv, opts)
