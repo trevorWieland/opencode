@@ -655,6 +655,54 @@ it.instance("static loop returns assistant text through local provider", () =>
   }),
 )
 
+it.instance("StructuredOutput tool survives restrictive permission filtering", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    // Restrictive ruleset that would normally cause resolveTools to drop the
+    // synthetic StructuredOutput tool.
+    const session = yield* sessions.create({
+      title: "Structured deny",
+      permission: [{ permission: "*", pattern: "*", action: "deny" }],
+    })
+
+    yield* prompt.prompt({
+      sessionID: session.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "What is 2+2?" }],
+      format: {
+        type: "json_schema",
+        schema: {
+          type: "object",
+          properties: { answer: { type: "number" } },
+          required: ["answer"],
+        },
+        retryCount: 0,
+      },
+    })
+
+    // Model is forced to call the synthetic tool; reply with a valid result so
+    // the loop completes.
+    yield* llm.push(reply().tool("StructuredOutput", { answer: 4 }))
+
+    const result = yield* prompt.loop({ sessionID: session.id })
+
+    // PRIMARY: the synthetic tool must be present in the request the provider
+    // received despite the deny rule. Without the fix resolveTools strips it.
+    const inputs = yield* llm.inputs
+    expect(JSON.stringify(inputs[0]?.tools)).toContain("StructuredOutput")
+
+    // SECONDARY: structured output was produced without error.
+    expect(result.info.role).toBe("assistant")
+    if (result.info.role === "assistant") {
+      expect(result.info.structured).toEqual({ answer: 4 })
+      expect(result.info.error).toBeUndefined()
+    }
+  }),
+)
+
 it.instance("static loop consumes queued replies across turns", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)

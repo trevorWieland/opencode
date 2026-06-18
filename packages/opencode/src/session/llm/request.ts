@@ -17,6 +17,8 @@ import { mergeDeep } from "remeda"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
 
+export const STRUCTURED_OUTPUT_TOOL_NAME = "StructuredOutput"
+
 type PrepareInput = {
   readonly user: SessionV1.User
   readonly sessionID: string
@@ -200,7 +202,10 @@ function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission"
     Object.keys(input.tools),
     Permission.merge(input.agent.permission, input.permission ?? []),
   )
-  return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+  return Record.filter(
+    input.tools,
+    (_, k) => k === STRUCTURED_OUTPUT_TOOL_NAME || (input.user.tools?.[k] !== false && !disabled.has(k)),
+  )
 }
 
 export function hasToolCalls(messages: ModelMessage[]): boolean {
