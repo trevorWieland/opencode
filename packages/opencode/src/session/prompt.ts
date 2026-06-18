@@ -35,6 +35,7 @@ import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
+import { STRUCTURED_OUTPUT_TOOL_NAME } from "./llm/request"
 import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "@/tool/shell/id"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -1300,7 +1301,7 @@ export const layer = Layer.effect(
             )
 
             if (lastUser.format?.type === "json_schema") {
-              tools["StructuredOutput"] = createStructuredOutputTool({
+              tools[STRUCTURED_OUTPUT_TOOL_NAME] = createStructuredOutputTool({
                 schema: lastUser.format.schema,
                 onSuccess(output) {
                   structured = output
