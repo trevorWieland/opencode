@@ -83,6 +83,44 @@ function formatRunError(error: unknown) {
   return FormatError(error) ?? FormatUnknownError(error)
 }
 
+type OutputSchema = Record<string, unknown>
+
+// Resolves the `--output-schema` flag value into a parsed JSON Schema object.
+// The value is either an inline JSON string (trimmed value starting with `{`)
+// or a path to a JSON Schema file, resolved relative to `baseDir`. Returns a
+// human-readable error string on any failure (file missing, invalid JSON, or a
+// non-object value) so the caller can route it through the usual `die(...)`
+// path; returns the parsed object on success.
+type ResolvedOutputSchema =
+  | { schema: OutputSchema; error?: undefined }
+  | { schema?: undefined; error: string }
+
+export async function resolveOutputSchema(value: string, baseDir: string): Promise<ResolvedOutputSchema> {
+  let raw: string
+  if (value.trim().startsWith("{")) {
+    raw = value
+  } else {
+    const resolvedPath = path.resolve(baseDir, value)
+    if (!(await Filesystem.exists(resolvedPath))) {
+      return { error: `Schema file not found: ${value}` }
+    }
+    raw = await Bun.file(resolvedPath).text()
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    return { error: `Invalid JSON in --output-schema: ${error instanceof Error ? error.message : String(error)}` }
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: "--output-schema must be a JSON object" }
+  }
+
+  return { schema: parsed as OutputSchema }
+}
+
 async function tool(part: ToolPart) {
   try {
     const { toolInlineInfo } = await import("./run/tool")
@@ -172,6 +210,14 @@ export const RunCommand = effectCmd({
         choices: ["default", "json"],
         default: "default",
         describe: "format: default (formatted) or json (raw JSON events)",
+      })
+      .option("output-schema", {
+        type: "string",
+        describe: "structured output: path to a JSON Schema file or an inline JSON schema string",
+      })
+      .option("output-schema-retries", {
+        type: "number",
+        describe: "number of retries when the model fails to produce structured output (default 2)",
       })
       .option("file", {
         alias: ["f"],
@@ -288,6 +334,23 @@ export const RunCommand = effectCmd({
         die("--replay-limit must be a positive integer")
       }
 
+      const structuredMode = args["output-schema"] !== undefined
+
+      if (structuredMode && args.interactive) {
+        die("--output-schema cannot be used with --interactive")
+      }
+
+      if (structuredMode && args.command) {
+        die("--output-schema cannot be used with --command")
+      }
+
+      if (
+        args["output-schema-retries"] !== undefined &&
+        (!Number.isInteger(args["output-schema-retries"]) || args["output-schema-retries"] < 0)
+      ) {
+        die("--output-schema-retries must be a non-negative integer")
+      }
+
       if (args.interactive && !process.stdout.isTTY) {
         die("--interactive requires a TTY stdout")
       }
@@ -345,6 +408,19 @@ export const RunCommand = effectCmd({
             filename: path.basename(resolvedPath),
             mime,
           })
+        }
+      }
+
+      type PromptFormat = NonNullable<Parameters<OpencodeClient["session"]["prompt"]>[0]["format"]>
+      let outputFormat: PromptFormat | undefined
+      if (structuredMode) {
+        const resolved = await resolveOutputSchema(args["output-schema"]!, directory ?? root)
+        const schema = resolved.schema ?? die(resolved.error!)
+        const retries = args["output-schema-retries"]
+        outputFormat = {
+          type: "json_schema",
+          schema,
+          ...(retries !== undefined ? { retryCount: retries } : {}),
         }
       }
 
@@ -632,6 +708,10 @@ export const RunCommand = effectCmd({
         async function loop(client: OpencodeClient, events: Awaited<ReturnType<typeof sdk.event.subscribe>>) {
           const toggles = new Map<string, boolean>()
           let error: string | undefined
+          // In structured (default-format) mode, stdout must contain ONLY the
+          // compact JSON result, so suppress the human render blocks. `--format
+          // json` is unaffected — its event stream rides through `emit(...)`.
+          const suppressHuman = structuredMode && args.format !== "json"
 
           for await (const event of events.stream) {
             if (
@@ -639,6 +719,7 @@ export const RunCommand = effectCmd({
               event.properties.sessionID === sessionID &&
               event.properties.info.role === "assistant" &&
               args.format !== "json" &&
+              !suppressHuman &&
               toggles.get("start") !== true
             ) {
               UI.empty()
@@ -653,6 +734,7 @@ export const RunCommand = effectCmd({
 
               if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
                 if (emit("tool_use", { part })) continue
+                if (suppressHuman) continue
                 if (part.state.status === "completed") {
                   await tool(part)
                   continue
@@ -665,7 +747,8 @@ export const RunCommand = effectCmd({
                 part.type === "tool" &&
                 part.tool === "task" &&
                 part.state.status === "running" &&
-                args.format !== "json"
+                args.format !== "json" &&
+                !suppressHuman
               ) {
                 if (toggles.get(part.id) === true) continue
                 await tool(part)
@@ -682,6 +765,7 @@ export const RunCommand = effectCmd({
 
               if (part.type === "text" && part.time?.end) {
                 if (emit("text", { part })) continue
+                if (suppressHuman) continue
                 const text = part.text.trim()
                 if (!text) continue
                 if (!process.stdout.isTTY) {
@@ -695,6 +779,7 @@ export const RunCommand = effectCmd({
 
               if (part.type === "reasoning" && part.time?.end && thinking) {
                 if (emit("reasoning", { part })) continue
+                if (suppressHuman) continue
                 const text = part.text.trim()
                 if (!text) continue
                 const line = `Thinking: ${text}`
@@ -797,6 +882,7 @@ export const RunCommand = effectCmd({
             model,
             variant: args.variant,
             parts: [...files, { type: "text", text: message }],
+            ...(outputFormat ? { format: outputFormat } : {}),
           })
           if (result.error) {
             if (!emit("error", { error: result.error })) UI.error(formatRunError(result.error))
@@ -804,6 +890,29 @@ export const RunCommand = effectCmd({
             return
           }
           await finish()
+
+          // Structured-output emission (default-format mode only). `--format
+          // json` already carries the structured result on its assistant
+          // message event, so it is intentionally left untouched here.
+          if (structuredMode && args.format !== "json") {
+            const info = result.data?.info
+            const infoError = info?.error
+            // The runtime does NOT throw on structured failure — it sets the
+            // error on the returned assistant message. A failure must NOT print
+            // any partial JSON to stdout.
+            if (infoError) {
+              if (infoError.name === "StructuredOutputError") {
+                UI.error(
+                  `Failed to produce structured output after ${infoError.data.retries} retries: ${infoError.data.message}`,
+                )
+              } else {
+                UI.error(formatRunError(infoError))
+              }
+              process.exitCode = 1
+              return
+            }
+            process.stdout.write(JSON.stringify(info?.structured) + EOL)
+          }
           return
         }
 
