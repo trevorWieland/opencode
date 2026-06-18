@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InvariantReview",
+  "description": "Structured verdict on whether a freshly-rebased patch stack still preserves the fork's invariants. Consumed by the CI publish gate. Produced by the FORK opencode binary via `--output-schema` (dogfooding feature #9320).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "invariants": {
+      "type": "array",
+      "description": "One entry per invariant in prompts/resolve-conflict.md (#1 encode-as-Struct, #2 retryCount, #3 permission-exempt tool, #4 --output-schema CLI).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "minimum": 1, "maximum": 4 },
+          "preserved": { "type": "boolean" },
+          "evidence": { "type": "string", "description": "File/symbol-level justification for the verdict." }
+        },
+        "required": ["id", "preserved", "evidence"]
+      }
+    },
+    "all_preserved": { "type": "boolean" },
+    "redundant_patches": {
+      "type": "array",
+      "description": "Invariant ids upstream has now implemented itself, so our patch for them can be dropped.",
+      "items": { "type": "integer" }
+    },
+    "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+    "recommend_publish": { "type": "boolean" },
+    "summary": { "type": "string", "description": "One-paragraph rationale; becomes the ntfy body if escalation is needed." }
+  },
+  "required": ["invariants", "all_preserved", "risk", "recommend_publish", "summary"]
+}

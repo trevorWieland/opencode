@@ -1,0 +1,11 @@
+# Never commit credentials or transient state
+auth.json
+*.key
+.env
+.rr-cache/
+
+# Build artifacts produced by build-and-release.sh
+dist/
+opencode-linux-x64
+*.tar.gz
+node_modules/

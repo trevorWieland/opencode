@@ -1,0 +1,115 @@
+name: daily-upstream-sync
+
+# Daily: fast-forward the pristine `dev` mirror, rebase our patch stack onto it,
+# and publish a fresh `personal` build. Deterministic git resolution first; the
+# agent runs at most once, only if that fails; ntfy fires only if the agent also
+# fails (intervention required). Success and self-healed days are silent.
+#
+# FORK-INTERNAL ONLY: GITHUB_TOKEN here cannot reach anomalyco/opencode, and this
+# job never pushes the PR-bound `patches/*` branches.
+
+on:
+  schedule:
+    - cron: "0 9 * * *" # 09:00 UTC daily — TODO: confirm preferred time
+  workflow_dispatch: {} # manual trigger for testing
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push fork branches + publish the rolling release
+
+env:
+  UPSTREAM_URL: https://github.com/anomalyco/opencode.git
+  UPSTREAM_BRANCH: dev
+  MIRROR: dev
+  STACK_TOP: patches/output-schema-cli # tip of the stack (TODO: exists once feature ④ lands)
+  PERSONAL: personal
+  RERERE_DIR: ${{ github.workspace }}/.rr-cache
+  AGENT_MODEL: ${{ vars.AGENT_MODEL || 'zai-coding-plan/glm-5.2' }} # official Z.AI provider/model
+  NTFY_URL: ${{ secrets.NTFY_URL }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout automation branch (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Materialize fork branches locally
+        run: |
+          git config user.name "opencode-fork-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*'
+          for b in "$MIRROR" "$STACK_TOP"; do
+            git show-ref --verify --quiet "refs/heads/$b" || git branch "$b" "origin/$b" || true
+          done
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install deps
+        run: bun install --frozen-lockfile
+
+      - name: Restore rerere cache
+        uses: actions/cache@v4
+        with:
+          path: .rr-cache
+          key: rerere-${{ github.run_id }}
+          restore-keys: rerere-
+
+      - name: Deterministic sync
+        id: det
+        run: |
+          set +e
+          SYNC_DATE="$(date -u +%Y%m%d)" bash scripts/sync-upstream.sh
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Configure opencode for GLM (agent runtime)
+        if: steps.det.outputs.code == '10' || steps.det.outputs.code == '20'
+        env:
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+        run: |
+          # Install a stable opencode to do the resolving (independent of our patches).
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          # Authenticate the official Z.AI provider (zai-coding-plan) via auth.json.
+          bash scripts/configure-opencode-glm.sh
+
+      - name: Agentic resolve (once)
+        id: agent
+        if: steps.det.outputs.code == '10' || steps.det.outputs.code == '20'
+        run: |
+          set +e
+          SYNC_DATE="$(date -u +%Y%m%d)" bash scripts/agentic-resolve.sh
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Publish (deterministic or agent succeeded)
+        if: steps.det.outputs.code == '0' || steps.agent.outputs.code == '0'
+        run: |
+          git push --force-with-lease origin "$PERSONAL"
+          git push origin "$MIRROR"
+          bash scripts/build-and-release.sh   # build binary -> rolling 'fork-latest' release
+
+      - name: Escalate (intervention required)
+        if: >
+          steps.det.outputs.code == '30' ||
+          (steps.agent.outputs.code != '' && steps.agent.outputs.code != '0')
+        run: |
+          DATE="$(date -u +%Y%m%d)"
+          git push --force-with-lease origin "HEAD:sync/attempt-${DATE}" || true
+          REASON="det=${{ steps.det.outputs.code }} agent=${{ steps.agent.outputs.code }}"
+          bash scripts/notify.sh "opencode fork sync needs you" \
+            "Daily sync could not self-heal (${REASON}). See branch sync/attempt-${DATE}."
+          exit 1
+
+      - name: Save rerere cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .rr-cache
+          key: rerere-${{ github.run_id }}
