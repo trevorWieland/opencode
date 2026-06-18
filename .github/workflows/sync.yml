@@ -24,7 +24,7 @@ env:
   UPSTREAM_URL: https://github.com/anomalyco/opencode.git
   UPSTREAM_BRANCH: dev
   MIRROR: dev
-  STACK_TOP: patches/output-schema-cli # tip of the stack (TODO: exists once feature ④ lands)
+  STACK_TOP: feat/structured-output-permission-exempt # tip of the feat/* patch stack (bug-fix -> ④ cli -> ③ perm-exempt)
   PERSONAL: personal
   RERERE_DIR: ${{ github.workspace }}/.rr-cache
   AGENT_MODEL: ${{ vars.AGENT_MODEL || 'zai-coding-plan/glm-5.2' }} # official Z.AI provider/model
